@@ -1,6 +1,14 @@
 import { User } from "../entities/User";
 import { MyContext } from "src/types";
-import { Resolver, Mutation, Arg, InputType, Field, Ctx } from "type-graphql";
+import {
+  Resolver,
+  Mutation,
+  Arg,
+  InputType,
+  Field,
+  Ctx,
+  ObjectType,
+} from "type-graphql";
 import argon2 from "argon2";
 
 @InputType()
@@ -12,19 +20,109 @@ class UsernamePasswordInput {
   password: string;
 }
 
+@ObjectType()
+class FieldError {
+  @Field()
+  field?: string;
+
+  @Field()
+  message: string;
+}
+
+@ObjectType()
+class UserResponse {
+  @Field(() => [FieldError], { nullable: true })
+  errors?: FieldError[];
+
+  @Field(() => User, { nullable: true })
+  user?: User;
+}
+
 @Resolver()
 export class UserResolver {
-  @Mutation(() => User)
+  @Mutation(() => UserResponse)
   async register(
     @Arg("options") options: UsernamePasswordInput,
     @Ctx() { em }: MyContext
-  ): Promise<User> {
+  ): Promise<UserResponse | null> {
+    let errors: FieldError[] = [];
+
+    const existingUser = em.findOne(User, { username: options.username });
+
+    if (existingUser) {
+      errors.push({
+        field: "username",
+        message: "already exists",
+      });
+    }
+
+    if (options.username.length <= 3) {
+      errors.push({
+        field: "username",
+        message: "length must be greater than 3",
+      });
+    }
+
+    if (options.password.length <= 3) {
+      errors.push({
+        field: "password",
+        message: "length must be greater than 3",
+      });
+    }
+    if (errors.length > 0) {
+      return { errors: errors };
+    }
+
     const hashedPassword = await argon2.hash(options.password);
     const user = em.create(User, {
       username: options.username,
       password: hashedPassword,
     });
-    await em.persistAndFlush(user);
-    return user;
+
+    try {
+      await em.persistAndFlush(user);
+    } catch (err) {
+      // Print only err message for now
+      console.error(
+        `Unable to persist user with username = ${user.username}`,
+        err.message
+      );
+      return null;
+    }
+
+    return { user };
+  }
+
+  @Mutation(() => UserResponse)
+  async login(
+    @Arg("options") options: UsernamePasswordInput,
+    @Ctx() { em }: MyContext
+  ): Promise<UserResponse> {
+    const user = await em.findOne(User, { username: options.username });
+
+    if (!user) {
+      return {
+        errors: [
+          {
+            field: "username",
+            message: `Username ${options.username} does not exist`,
+          },
+        ],
+      };
+    }
+
+    const isValidPwd = await argon2.verify(user.password, options.password);
+    if (!isValidPwd) {
+      return {
+        errors: [
+          {
+            field: "password",
+            message: `Password is incorrect`,
+          },
+        ],
+      };
+    }
+
+    return { user };
   }
 }
